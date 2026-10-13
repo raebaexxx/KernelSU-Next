@@ -4,3 +4,10 @@ CLAUDE.md
 AGENTS.md
 .DS_Store
 /userspace/ksud/.lkm_image_bootstrap.o
+
+# kernel build artifacts (kernelsu is symlinked into the kernel tree as drivers/kernelsu)
+kernel/built-in.a
+*.o
+*.a
+*.ko
+.*.cmd
