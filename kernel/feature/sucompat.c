@@ -1,6 +1,5 @@
 #include "linux/file.h"
 #include "linux/fcntl.h"
-#include "linux/namei.h"
 #include <linux/compiler_types.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
@@ -14,6 +13,12 @@
 #include <linux/version.h>
 #include <linux/sched/task_stack.h>
 #include <linux/ptrace.h>
+#include <linux/susfs_def.h>
+#include <linux/namei.h>
+#include <linux/minmax.h>
+#include <linux/fs_struct.h>
+#include "selinux/selinux.h"
+#include "objsec.h"
 
 #include "arch.h"
 #include "policy/allowlist.h"
@@ -61,6 +66,13 @@ static void __user *userspace_stack_buffer(const void *d, size_t len)
 	char __user *p = (void __user *)current_user_stack_pointer() - len;
 
 	return copy_to_user(p, d, len) ? NULL : p;
+}
+
+static char __user *sh_user_path(void)
+{
+    static const char sh_path[] = "/system/bin/sh";
+
+    return userspace_stack_buffer(sh_path, sizeof(sh_path));
 }
 
 static char __user *ksud_user_path(void)
@@ -194,7 +206,7 @@ static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
 	}
 
 	if (likely(memcmp(path, su_path, sizeof(su_path))))
-		goto do_orig_execve;
+		goto do_orig_execve_checked;
 
 	ksu_compat_sulog('x');
 	pr_info("sys_execve su found\n");
@@ -253,6 +265,17 @@ static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
 		}
 	}
 	return ret;
+
+do_orig_execve_checked:
+#ifdef CONFIG_KSU_SUSFS
+	// Not a `su` exec: the resulting process will not be root, so mark it for susfs.
+	// Only zygote / adbd spawners are excluded, as the processes they fork are the
+	// ones that later get marked umounted by the setresuid hook.
+	if (likely(!strstr(path, "/app_process") && !strstr(path, "/adbd") &&
+		   !strstr(path, "/stub_zygote"))) {
+		susfs_set_current_proc_no_su();
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 do_orig_execve:
 	return ksu_syscall_table[orig_nr](regs);
