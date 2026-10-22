@@ -18,6 +18,7 @@
 #include <linux/namei.h>
 #include <linux/workqueue.h>
 #include <linux/uio.h>
+#include <linux/static_key.h>
 #include <linux/stat.h>
 
 #include "arch.h"
@@ -54,7 +55,6 @@ static const char KERNEL_SU_RC[] =
 static void stop_init_rc_hook();
 static void stop_execve_hook();
 
-static struct work_struct stop_input_hook_work;
 
 #define MAX_ARG_STRINGS 0x7FFFFFFF
 struct user_arg_ptr {
@@ -479,6 +479,10 @@ static void ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *
 
 static unsigned int volumedown_pressed_count = 0;
 
+// Armed by ksu_ksud_init(), consumed by the inline hook that the SUSFS kernel
+// patch installs in drivers/input/input.c.
+DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
+
 static bool is_volumedown_enough(unsigned int count)
 {
     return count >= 3;
@@ -514,7 +518,10 @@ bool ksu_is_safe_mode()
     }
 
     // stop hook first!
-    ksu_stop_input_hook_runtime();
+    if (static_key_enabled(&ksu_is_input_hook_enabled)) {
+        static_branch_disable(&ksu_is_input_hook_enabled);
+        pr_info("ksu_input_hook is disabled\n");
+    }
 
     pr_info("volumedown_pressed_count: %d\n", volumedown_pressed_count);
     if (is_volumedown_enough(volumedown_pressed_count)) {
@@ -618,23 +625,11 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
     return ret;
 }
 
-static int input_handle_event_handler_pre(struct kprobe *p, struct pt_regs *regs)
-{
-    unsigned int *type = (unsigned int *)&PT_REGS_PARM2(regs);
-    unsigned int *code = (unsigned int *)&PT_REGS_PARM3(regs);
-    int *value = (int *)&PT_REGS_CCALL_PARM4(regs);
-    return ksu_handle_input_handle_event(type, code, value);
-}
-
-static struct kprobe input_event_kp = {
-    .symbol_name = "input_event",
-    .pre_handler = input_handle_event_handler_pre,
-};
-
-static void do_stop_input_hook(struct work_struct *work)
-{
-    unregister_kprobe(&input_event_kp);
-}
+// The kprobe on input_event is superseded by the inline static-branch hook that
+// the SUSFS kernel patch installs in drivers/input/input.c; see
+// ksu_is_input_hook_enabled and ksu_ksud_init(). Keeping both would feed
+// ksu_handle_input_handle_event twice per event and trigger safe mode after a
+// single volume-down press instead of three.
 
 static void stop_init_rc_hook()
 {
@@ -650,22 +645,21 @@ void ksu_stop_input_hook_runtime(void)
         return;
     }
     input_hook_stopped = true;
-    bool ret = schedule_work(&stop_input_hook_work);
-    pr_info("unregister input kprobe: %d!\n", ret);
+    if (static_key_enabled(&ksu_is_input_hook_enabled)) {
+        static_branch_disable(&ksu_is_input_hook_enabled);
+    }
+    pr_info("ksu_input_hook is disabled\n");
 }
 
 // ksud: module support
 void __init ksu_ksud_init()
 {
-    int ret;
-
     ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
     ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
 
-    ret = register_kprobe(&input_event_kp);
-    pr_info("ksud: input_event_kp: %d\n", ret);
-
-    INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
+    // Arm the inline input hook installed by the SUSFS kernel patch; the kprobe on
+    // input_event is deliberately not registered (see the note above).
+    static_branch_enable(&ksu_is_input_hook_enabled);
 }
 
 void __exit ksu_ksud_exit()
@@ -673,7 +667,10 @@ void __exit ksu_ksud_exit()
     // TODO:
     // this should be done before unregister vfs_read_kp
     // stop_init_rc_hook();
-    unregister_kprobe(&input_event_kp);
+    if (static_key_enabled(&ksu_is_input_hook_enabled)) {
+        static_branch_disable(&ksu_is_input_hook_enabled);
+        pr_info("ksu_input_hook is disabled\n");
+    }
 
     if (module_rc_buf) {
         free_module_rc();

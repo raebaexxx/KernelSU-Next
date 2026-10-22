@@ -69,21 +69,21 @@ static int ksu_install_fd_with_permissions(unsigned int fd_flags, unsigned long 
 
     fd = get_unused_fd_flags(fd_flags);
     if (fd < 0) {
-        pr_err("ksu_install_fd: failed to get unused fd\n");
+        pr_err("ksu_install_fd: failed to get unused fd for %s\n", name);
         kfree(context);
         return fd;
     }
 
     filp = anon_inode_getfile(name, &anon_ksu_fops, context, O_RDWR);
     if (IS_ERR(filp)) {
-        pr_err("ksu_install_fd: failed to create anon inode file\n");
+        pr_err("ksu_install_fd: failed to create anon inode file for %s\n", name);
         put_unused_fd(fd);
         kfree(context);
         return PTR_ERR(filp);
     }
 
     fd_install(fd, filp);
-    pr_info("ksu fd installed: %d for pid %d\n", fd, current->pid);
+    pr_info("%s fd installed: %d for pid %d\n", name, fd, current->pid);
     return fd;
 }
 
@@ -117,6 +117,27 @@ static void ksu_install_fd_tw_func(struct callback_head *cb)
     }
 
     kfree(tw);
+}
+
+// Entry point used by the SUSFS-patched dispatch.c when the caller reaches the
+// install-fd magic through the supercall path instead of the reboot kprobe.
+int ksu_supercall_reboot_handler(void __user **arg)
+{
+    struct ksu_install_fd_tw *tw;
+
+    tw = kzalloc(sizeof(*tw), GFP_KERNEL);
+    if (!tw)
+        return 0;
+
+    tw->outp = (int __user *)(*arg);
+    tw->cb.func = ksu_install_fd_tw_func;
+
+    if (task_work_add(current, &tw->cb, TWA_RESUME)) {
+        kfree(tw);
+        pr_warn("install fd add task_work failed\n");
+    }
+
+    return 0;
 }
 
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)

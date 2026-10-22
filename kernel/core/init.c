@@ -5,6 +5,9 @@
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/workqueue.h>
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 #include "policy/allowlist.h"
 #include "policy/app_profile.h"
@@ -142,6 +145,10 @@ int __init kernelsu_init(void)
 
 	ksu_init_symbol_resolver();
 	ksu_syscall_hook_init();
+
+#ifdef CONFIG_KSU_SUSFS
+	susfs_init();
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 	// Block modules early, before vendor modules are loaded in second stage.
 	ksu_module_blacklist_init();
